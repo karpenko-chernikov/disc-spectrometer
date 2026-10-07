@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Optional
 
 # Без окон GUI — иначе на macOS Python падает при «открыть окна снова»
-os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ["MPLBACKEND"] = "Agg"
 
 import cv2
 import matplotlib
 
-matplotlib.use("Agg")
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
