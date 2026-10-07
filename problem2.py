@@ -1077,6 +1077,7 @@ def сохранить_график_спектра(
     ax.set_xlabel("")
     ax.tick_params(labelbottom=False)
     ax.set_xlim(xmin, xmax)
+    ax.margins(x=0)
 
     ax_bar.set_yticks([])
     ax_bar.tick_params(axis="x", pad=2)
@@ -1086,6 +1087,7 @@ def сохранить_график_спектра(
     ax_bar.grid(False)
     ax_bar.set_ylim(0, 1)
     ax_bar.set_xlim(xmin, xmax)
+    ax_bar.margins(x=0)
 
     fig.subplots_adjust(hspace=0.28, bottom=0.12, top=0.90)
     fig.savefig(путь)
