@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -15,7 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Без окон GUI — иначе на macOS Python падает при «открыть окна снова»
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import cv2
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -654,7 +661,7 @@ def настроить_стиль_графиков() -> None:
 
 
 def длина_волны_в_rgb(нм: float) -> tuple[float, float, float]:
-    """Приблизительный цвет видимого спектра для заливки/подписей."""
+    """Приблизительный цвет видимого спектра (для заливки и линий)."""
     w = float(нм)
     if w < 380 or w > 780:
         return (0.55, 0.55, 0.55)
@@ -674,8 +681,10 @@ def длина_волны_в_rgb(нм: float) -> tuple[float, float, float]:
         t = (w - 580) / 65
         r, g, b = 1.0, 1 - t, 0.0
     else:
+        # глубокий красный: чуть темнеет к ИК, чтобы линии не были одним тоном
+        t = min(1.0, (w - 645) / 55)
         r, g, b = 1.0, 0.0, 0.0
-    # ослабление на краях видимого диапазона
+        r = 1.0 - 0.25 * t
     if w < 420:
         factor = 0.35 + 0.65 * (w - 380) / 40
     elif w > 700:
@@ -683,6 +692,21 @@ def длина_волны_в_rgb(нм: float) -> tuple[float, float, float]:
     else:
         factor = 1.0
     return (r * factor, g * factor, b * factor)
+
+
+def _цветная_полоска(ax, xmin: float, xmax: float, в_нм: bool) -> None:
+    if not в_нм or xmax <= xmin:
+        ax.axhspan(0, 1, color="#D8CFC0")
+        return
+    grid = np.linspace(xmin, xmax, 512)
+    rgb = np.array([[длина_волны_в_rgb(float(v)) for v in grid]], dtype=np.float64)
+    ax.imshow(
+        rgb,
+        aspect="auto",
+        extent=(xmin, xmax, 0, 1),
+        origin="lower",
+        interpolation="bilinear",
+    )
 
 
 def _оформить_оси(ax, заголовок: str, xlabel: str, ylabel: str) -> None:
@@ -814,12 +838,13 @@ def _подписи_пиков(
             },
             zorder=6,
         )
+        маркер = длина_волны_в_rgb(x) if в_нм else ЦВЕТА["акцент"]
         ax.plot(
             [x],
             [y],
             marker="o",
             ms=4.0,
-            color=ЦВЕТА["акцент"],
+            color=маркер,
             markeredgecolor="#FFFDF8",
             markeredgewidth=0.8,
             zorder=5,
@@ -1026,15 +1051,13 @@ def сохранить_график_спектра(
     x = wavelengths if в_нм else профиль.ось
     xlabel = "Длина волны, нм" if в_нм else "Пиксель"
 
-    fig = plt.figure(figsize=(12.5, 6.2))
-    # больше зазор между спектром и цветной полосой
-    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.10], hspace=0.28)
+    fig = plt.figure(figsize=(12.5, 6.0))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.10], hspace=0.26)
     ax = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
 
     xmin, xmax = float(np.min(x)), float(np.max(x))
 
-    # цветная заливка под кривой по длине волны
     if в_нм:
         for i in range(len(x) - 1):
             c = длина_волны_в_rgb(float(0.5 * (x[i] + x[i + 1])))
@@ -1042,26 +1065,13 @@ def сохранить_график_спектра(
                 x[i : i + 2],
                 профиль.I[i : i + 2],
                 color=c,
-                alpha=0.22,
+                alpha=0.55,
                 linewidth=0,
             )
-        # полоска на весь диапазон оси — без белых краёв от запасных полей matplotlib
-        n_bar = 512
-        grid = np.linspace(xmin, xmax, n_bar)
-        rgb = np.array([[длина_волны_в_rgb(float(v)) for v in grid]], dtype=np.float64)
-        ax_bar.imshow(
-            rgb,
-            aspect="auto",
-            extent=(xmin, xmax, 0, 1),
-            origin="lower",
-            interpolation="bilinear",
-        )
     else:
-        ax.fill_between(x, профиль.I, color="#B84E2B", alpha=0.12, linewidth=0)
-        ax_bar.axhspan(0, 1, color="#D8CFC0")
+        ax.fill_between(x, профиль.I, color="#B84E2B", alpha=0.25, linewidth=0)
 
-    ax.plot(x, профиль.I, color="#B84E2B", lw=4.0, alpha=0.12, solid_capstyle="round")
-    ax.plot(x, профиль.I, color=ЦВЕТА["линия"], lw=1.8, zorder=3)
+    ax.plot(x, профиль.I, color=ЦВЕТА["линия"], lw=1.7, zorder=3)
 
     px = (
         peak_wl
@@ -1070,15 +1080,17 @@ def сохранить_график_спектра(
     )
     py = np.array([p.интенсивность for p in пики], dtype=np.float64)
     for xv in px:
-        ax.axvline(xv, color=ЦВЕТА["акцент"], alpha=0.18, lw=0.9, zorder=1)
+        c = длина_волны_в_rgb(float(xv)) if в_нм else ЦВЕТА["акцент"]
+        ax.axvline(xv, color=c, alpha=0.35, lw=1.0, zorder=1)
     _подписи_пиков(ax, px, py, в_нм=в_нм)
 
-    _оформить_оси(ax, "Спектр с подписанными линиями", "", "Интенсивность (отн.)")
+    _оформить_оси(ax, "Спектр", "", "Интенсивность (отн.)")
     ax.set_xlabel("")
     ax.tick_params(labelbottom=False)
     ax.set_xlim(xmin, xmax)
     ax.margins(x=0)
 
+    _цветная_полоска(ax_bar, xmin, xmax, в_нм)
     ax_bar.set_yticks([])
     ax_bar.tick_params(axis="x", pad=2)
     ax_bar.set_xlabel(xlabel, labelpad=10)
@@ -1089,9 +1101,10 @@ def сохранить_график_спектра(
     ax_bar.set_xlim(xmin, xmax)
     ax_bar.margins(x=0)
 
-    fig.subplots_adjust(hspace=0.28, bottom=0.12, top=0.90)
+    fig.subplots_adjust(hspace=0.26, bottom=0.12, top=0.90)
     fig.savefig(путь)
     plt.close(fig)
+    plt.close("all")
 
 
 def сохранить_график_fwhm(
@@ -1131,14 +1144,15 @@ def сохранить_график_fwhm(
     ax.set_ylim(0, ymax * 1.28)
     _оформить_оси(
         ax,
-        "Ширина линий (FWHM) — чем уже, тем лучше разрешение",
+        "FWHM",
         "Длина волны, нм" if в_нм else "Пиксель",
         "FWHM, нм" if в_нм else "FWHM, пикс",
     )
     ед = "нм" if в_нм else "пикс"
-    _подпись_вне_графика(ax, f"медиана FWHM = {med:.2f} {ед}", где="верх_справа")
+    _подпись_вне_графика(ax, f"медиана = {med:.2f} {ед}", где="верх_справа")
     fig.savefig(путь)
     plt.close(fig)
+    plt.close("all")
 
 
 def сохранить_карту_линий(
@@ -1152,13 +1166,18 @@ def сохранить_карту_линий(
     xs = peak_wl if в_нм else np.array([p.пиксель for p in пики], dtype=np.float64)
     intensities = np.array([p.интенсивность for p in пики], dtype=np.float64)
     heights = 0.28 + 0.72 * (intensities / max(intensities.max(), 1e-9))
+    xmin, xmax = float(xs.min()), float(xs.max())
+    pad = max(0.5, 0.02 * (xmax - xmin + 1e-9))
 
-    fig, ax = plt.subplots(figsize=(12.2, 3.0))
+    fig = plt.figure(figsize=(12.2, 3.2))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.14], hspace=0.2)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
+
     for x, h in zip(xs, heights):
         color = длина_волны_в_rgb(float(x)) if в_нм else ЦВЕТА["акцент"]
-        ax.vlines(x, 0, h, color=color, lw=2.2)
-        ax.plot([x], [h], "o", color=color, ms=4)
-    # подписываем ВСЕ линии; соседние поднимаем на разные уровни
+        ax.vlines(x, 0, h, color=color, lw=2.4)
+        ax.plot([x], [h], "o", color=color, ms=5)
     order_x = np.argsort(xs)
     for номер, i in enumerate(order_x):
         y_text = min(heights[i] + 0.06 + (номер % 3) * 0.12, 1.28)
@@ -1170,20 +1189,30 @@ def сохранить_карту_линий(
             va="bottom",
             fontsize=7.5,
             color=ЦВЕТА["чернила"],
-            rotation=0,
         )
     ax.set_ylim(0, 1.38)
     ax.set_yticks([])
-    ax.set_xlim(xs.min() - (8 if в_нм else 5), xs.max() + (8 if в_нм else 5))
-    _оформить_оси(
-        ax,
-        "Карта линий (подписи — положение пиков)",
-        "Длина волны, нм" if в_нм else "Пиксель",
-        "",
-    )
+    ax.set_xlim(xmin - pad, xmax + pad)
+    ax.margins(x=0)
+    _оформить_оси(ax, "Карта линий", "", "")
+    ax.set_xlabel("")
+    ax.tick_params(labelbottom=False)
     ax.grid(False, axis="y")
+
+    _цветная_полоска(ax_bar, xmin - pad, xmax + pad, в_нм)
+    ax_bar.set_yticks([])
+    ax_bar.set_xlabel("Длина волны, нм" if в_нм else "Пиксель", labelpad=8)
+    for spine in ax_bar.spines.values():
+        spine.set_visible(False)
+    ax_bar.grid(False)
+    ax_bar.set_ylim(0, 1)
+    ax_bar.set_xlim(xmin - pad, xmax + pad)
+    ax_bar.margins(x=0)
+
+    fig.subplots_adjust(hspace=0.22, bottom=0.18, top=0.88)
     fig.savefig(путь)
     plt.close(fig)
+    plt.close("all")
 
 
 def сохранить_график_близких_пар(
@@ -1209,10 +1238,12 @@ def сохранить_график_близких_пар(
     center = 0.5 * (wl[k0] + wl[k0 + 1])
     span = max(8.0, 4.0 * gaps[k0])
     mask = (wl >= center - span) & (wl <= center + span)
-    ax.vlines(wl[mask], 0, intens[mask], color=ЦВЕТА["линия"], lw=2.0)
-    ax.plot(wl[mask], intens[mask], "o", color=ЦВЕТА["акцент"], ms=6)
     idxs = list(np.where(mask)[0])
     imax = float(intens[mask].max()) if len(idxs) else 1.0
+    for i in idxs:
+        c = длина_волны_в_rgb(float(wl[i]))
+        ax.vlines(wl[i], 0, intens[i], color=c, lw=2.2)
+        ax.plot([wl[i]], [intens[i]], "o", color=c, ms=6)
     for номер, i in enumerate(idxs):
         ax.annotate(
             f"{wl[i]:.1f}",
@@ -1231,10 +1262,10 @@ def сохранить_график_близких_пар(
             },
         )
     ax.set_ylim(0, imax * 1.35)
-    ax.axvspan(wl[k0], wl[k0 + 1], color=ЦВЕТА["акцент"], alpha=0.12)
+    ax.axvspan(wl[k0], wl[k0 + 1], color=длина_волны_в_rgb(float(center)), alpha=0.15)
     _оформить_оси(
         ax,
-        f"Самая близкая пара: Δλ = {gaps[k0]:.2f} нм",
+        f"Ближайшая пара  Δλ = {gaps[k0]:.2f} нм",
         "Длина волны, нм",
         "Интенсивность",
     )
@@ -1267,10 +1298,138 @@ def сохранить_график_близких_пар(
             clip_on=False,
         )
     ax2.set_xlim(0, xmax * 1.25)
-    _оформить_оси(ax2, "Ближайшие пары линий", "Δλ, нм", "")
+    _оформить_оси(ax2, "Ближайшие пары", "Δλ, нм", "")
     fig.tight_layout()
     fig.savefig(путь)
     plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_разрешения(
+    путь: Path,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+    fwhm_нм: np.ndarray | None,
+) -> None:
+    """R(λ) = λ / FWHM — ключевая метрика для задачи."""
+    if peak_wl is None or fwhm_нм is None or len(пики) == 0:
+        return
+    mask = fwhm_нм > 1e-9
+    if not np.any(mask):
+        return
+    wl = peak_wl[mask]
+    r_vals = wl / fwhm_нм[mask]
+    colors = [длина_волны_в_rgb(float(v)) for v in wl]
+
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
+    ax.scatter(wl, r_vals, c=colors, s=55, edgecolors="#2A2622", linewidths=0.5, zorder=3)
+    order = np.argsort(wl)
+    ax.plot(wl[order], r_vals[order], color=ЦВЕТА["линия"], lw=1.2, alpha=0.5)
+    med = float(np.median(r_vals))
+    ax.axhline(med, color=ЦВЕТА["акцент"], ls="--", lw=1.2)
+    for x, y in zip(wl, r_vals):
+        ax.text(x, y, f"{y:.0f}", ha="center", va="bottom", fontsize=7, color=ЦВЕТА["приглушённый"])
+    ax.set_ylim(0, float(np.max(r_vals)) * 1.25)
+    _оформить_оси(ax, "Разрешающая способность", "Длина волны, нм", "R = λ / FWHM")
+    _подпись_вне_графика(ax, f"медиана R = {med:.0f}", где="верх_справа")
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_критерия_разрешения(
+    путь: Path,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+    fwhm_нм: np.ndarray | None,
+) -> None:
+    """Для каждой соседней пары: Δλ против среднего FWHM (выше диагонали — разрешена)."""
+    if peak_wl is None or fwhm_нм is None or len(пики) < 2:
+        return
+    order = np.argsort(peak_wl)
+    wl = peak_wl[order]
+    fw = fwhm_нм[order]
+    gaps = np.diff(wl)
+    mean_fw = 0.5 * (fw[:-1] + fw[1:])
+    colors = [
+        длина_волны_в_rgb(float(0.5 * (wl[i] + wl[i + 1]))) for i in range(len(gaps))
+    ]
+
+    fig, ax = plt.subplots(figsize=(7.2, 6.4))
+    lim = float(max(np.max(gaps), np.max(mean_fw)) * 1.15)
+    ax.plot([0, lim], [0, lim], ls="--", color=ЦВЕТА["приглушённый"], lw=1.2)
+    ax.scatter(mean_fw, gaps, c=colors, s=70, edgecolors="#2A2622", linewidths=0.5, zorder=3)
+    for i, (xf, yg) in enumerate(zip(mean_fw, gaps)):
+        ax.text(
+            xf,
+            yg,
+            f"{wl[i]:.0f}–{wl[i+1]:.0f}",
+            fontsize=7,
+            ha="left",
+            va="bottom",
+            color=ЦВЕТА["чернила"],
+        )
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_aspect("equal", adjustable="box")
+    _оформить_оси(ax, "Критерий разрешения", "Средний FWHM, нм", "Δλ, нм")
+    _подпись_вне_графика(ax, "выше линии: Δλ > FWHM", где="верх_слева")
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_дисперсии(
+    путь: Path,
+    профиль: Профиль,
+    wavelengths: np.ndarray | None,
+) -> None:
+    """Локальная дисперсия нм/пиксель вдоль спектра."""
+    if wavelengths is None or len(wavelengths) < 3:
+        return
+    # dλ/dp вдоль оси профиля
+    px = профиль.ось
+    dlam = np.gradient(wavelengths, px)
+    dlam_abs = np.abs(dlam)
+
+    fig = plt.figure(figsize=(12.0, 4.6))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.12], hspace=0.24)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
+    xmin, xmax = float(wavelengths.min()), float(wavelengths.max())
+
+    for i in range(len(wavelengths) - 1):
+        c = длина_волны_в_rgb(float(0.5 * (wavelengths[i] + wavelengths[i + 1])))
+        ax.fill_between(
+            wavelengths[i : i + 2],
+            dlam_abs[i : i + 2],
+            color=c,
+            alpha=0.35,
+            linewidth=0,
+        )
+    ax.plot(wavelengths, dlam_abs, color=ЦВЕТА["линия"], lw=1.5)
+    med = float(np.median(dlam_abs))
+    ax.axhline(med, color=ЦВЕТА["акцент"], ls="--", lw=1.1)
+    _оформить_оси(ax, "Дисперсия", "", "нм / пиксель")
+    ax.set_xlabel("")
+    ax.tick_params(labelbottom=False)
+    ax.set_xlim(xmin, xmax)
+    ax.margins(x=0)
+    _подпись_вне_графика(ax, f"медиана = {med:.3f} нм/пикс", где="верх_справа")
+
+    _цветная_полоска(ax_bar, xmin, xmax, True)
+    ax_bar.set_yticks([])
+    ax_bar.set_xlabel("Длина волны, нм", labelpad=8)
+    for spine in ax_bar.spines.values():
+        spine.set_visible(False)
+    ax_bar.grid(False)
+    ax_bar.set_ylim(0, 1)
+    ax_bar.set_xlim(xmin, xmax)
+    ax_bar.margins(x=0)
+    fig.subplots_adjust(hspace=0.22, bottom=0.14, top=0.90)
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
 
 
 def сохранить_график_каналов(
@@ -1344,12 +1503,9 @@ def сохранить_отчёт(
         "",
         "## Файлы",
         "",
-        "- `спектр.png`",
-        "- `близкие_пары.png`",
-        "- `fwhm.png`",
-        "- `карта_линий.png`",
-        "- `каналы_rgb.png`",
-        "- `пики.csv`, `метрики.json`",
+        "- `спектр.png`, `карта_линий.png`, `близкие_пары.png`",
+        "- `fwhm.png`, `разрешение.png`, `критерий_разрешения.png`, `дисперсия.png`",
+        "- `каналы_rgb.png`, `пики.csv`, `метрики.json`",
         "",
     ]
     путь.write_text("\n".join(lines), encoding="utf-8")
@@ -1463,6 +1619,13 @@ def обработать_одно_фото(
     сохранить_график_близких_пар(
         out_dir / "близкие_пары.png", пики, peak_wl, fwhm_нм
     )
+    сохранить_график_разрешения(
+        out_dir / "разрешение.png", пики, peak_wl, fwhm_нм
+    )
+    сохранить_график_критерия_разрешения(
+        out_dir / "критерий_разрешения.png", пики, peak_wl, fwhm_нм
+    )
+    сохранить_график_дисперсии(out_dir / "дисперсия.png", профиль, wavelengths)
     сохранить_график_каналов(
         out_dir / "каналы_rgb.png", профиль, пики, wavelengths, peak_wl
     )
@@ -1495,7 +1658,10 @@ def обработать_одно_фото(
             shutil.move(str(фото), str(dest))
 
     печать(f"  пиков: {len(пики)} → {out_dir}")
-    печать("  файлы: спектр.png, близкие_пары.png, fwhm.png, каналы_rgb.png, отчёт.md …")
+    печать(
+        "  файлы: спектр.png, карта_линий.png, разрешение.png, "
+        "критерий_разрешения.png, дисперсия.png …"
+    )
     return out_dir
 
 
