@@ -95,8 +95,9 @@ def обеспечить_структуру_сессии(сессия: Path) -> 
     описание = сессия / "описание.txt"
     if not описание.exists():
         описание.write_text(
-            "Сессия спектрометра.\n"
-            "Опишите установку: диск (CD/DVD), щель, угол, камера, дата.\n",
+            "Папка эксперимента спектрометра.\n"
+            "Опишите установку: диск (CD/DVD), щель, угол, камера, дата.\n"
+            "Новые фото кладите в папку «вход».\n",
             encoding="utf-8",
         )
 
@@ -113,15 +114,34 @@ def список_сессий() -> list[Path]:
 def создать_сессию() -> Path:
     ПАПКА_СЕССИЙ.mkdir(parents=True, exist_ok=True)
     сегодня = datetime.now().strftime("%Y-%m-%d")
-    имя = спросить("Имя сессии", f"{сегодня}_dvd_неон")
+    печать(
+        "\nНовая папка эксперимента — это один набор фото\n"
+        "с одной и той же настройкой установки (диск, щель, камера).\n"
+        "Если подвинули камеру или сменили диск — лучше создать новую папку.\n"
+    )
+    имя = спросить("Как назвать папку", f"{сегодня}_dvd_неон")
     имя = имя.replace(" ", "_")
     путь = ПАПКА_СЕССИЙ / имя
     if путь.exists():
-        печать(f"Сессия уже есть: {путь}")
+        печать(f"Такая папка уже есть: {путь}")
     else:
         обеспечить_структуру_сессии(путь)
-        печать(f"Создана сессия: {путь}")
+        печать(f"Создана папка: {путь}")
+        печать(f"Положите фото сюда: {путь / 'вход'}")
     return путь
+
+
+def краткий_статус_папки(сессия: Path) -> str:
+    есть_шкала = путь_калибровки(сессия).exists()
+    n_in = len(список_фото(сессия / "вход"))
+    n_res = 0
+    res = сессия / "результаты"
+    if res.exists():
+        n_res = sum(1 for p in res.iterdir() if p.is_dir())
+    шкала = "шкала нм готова" if есть_шкала else "шкала нм ещё не настроена"
+    фото = f"новых фото: {n_in}" if n_in else "новых фото нет"
+    готово = f"уже обработано: {n_res}" if n_res else "обработанных пока нет"
+    return f"{шкала}; {фото}; {готово}"
 
 
 def выбрать_сессию(арг: str | None = None) -> Path:
@@ -129,20 +149,25 @@ def выбрать_сессию(арг: str | None = None) -> Path:
         путь = Path(арг)
         if not путь.is_absolute():
             путь = КОРЕНЬ / путь
-        if not путь.exists():
-            обеспечить_структуру_сессии(путь)
-        else:
-            обеспечить_структуру_сессии(путь)
+        обеспечить_структуру_сессии(путь)
         return путь
 
-    сессии = список_сессий()
-    варианты: dict[str, str] = {"0": "Создать новую сессию"}
-    for i, s in enumerate(сессии, start=1):
-        cal = "есть cal" if (s / "калибровка" / "калибровка.json").exists() else "нет cal"
-        n_in = len(список_фото(s / "вход"))
-        варианты[str(i)] = f"{s.name}  ({cal}, во входе: {n_in})"
+    печать(
+        "\nСначала выберите папку эксперимента.\n"
+        "Это просто папка с вашими фото одной настройки установки.\n"
+        "Внутри неё программа сама ведёт папки «вход», «результаты» и шкалу длин волн.\n"
+    )
 
-    выбор = спросить_выбор("\nВыберите сессию:", варианты)
+    сессии = список_сессий()
+    if not сессии:
+        печать("Папок экспериментов ещё нет — создадим первую.")
+        return создать_сессию()
+
+    варианты: dict[str, str] = {"0": "Создать новую папку эксперимента"}
+    for i, s in enumerate(сессии, start=1):
+        варианты[str(i)] = f"{s.name}  —  {краткий_статус_папки(s)}"
+
+    выбор = спросить_выбор("Какую папку открыть?", варианты)
     if выбор == "0":
         return создать_сессию()
     return сессии[int(выбор) - 1]
@@ -155,15 +180,39 @@ def путь_калибровки(сессия: Path) -> Path:
 def статус_калибровки(сессия: Path) -> str:
     p = путь_калибровки(сессия)
     if not p.exists():
-        return "нет"
+        return "ещё не настроена (пиксели пока без нанометров)"
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         формула = data.get("формула", "?")
         n = len(data.get("пары", []))
-        return f"есть ({формула}, {n} линий)"
+        return f"готова ({формула}, по {n} эталонным линиям)"
     except Exception:
-        return "есть (файл повреждён?)"
+        return "файл шкалы повреждён — лучше настроить заново"
 
+
+def подсказка_следующего_шага(сессия: Path) -> str:
+    n_in = len(список_фото(сессия / "вход"))
+    есть_шкала = путь_калибровки(сессия).exists()
+    if n_in == 0 and not есть_шкала:
+        return (
+            f"Сейчас во «вход» пусто.\n"
+            f"1) Положите фото спектров сюда:\n   {сессия / 'вход'}\n"
+            f"2) Запустите снова и выберите пункт про настройку шкалы / обработку."
+        )
+    if n_in > 0 and not есть_шкала:
+        return (
+            f"Есть {n_in} новых фото, но шкала длин волн ещё не настроена.\n"
+            f"Обычно дальше: пункт [3] — настроить шкалу и сразу обработать."
+        )
+    if n_in > 0 and есть_шкала:
+        return (
+            f"Шкала уже есть, во «вход» лежит {n_in} фото.\n"
+            f"Обычно дальше: пункт [2] — обработать новые фото."
+        )
+    return (
+        "Новых фото во «вход» нет.\n"
+        "Положите снимки в папку «вход» или настройте шкалу заново, если меняли установку."
+    )
 
 def список_фото(папка: Path) -> list[Path]:
     if not папка.exists():
@@ -558,8 +607,166 @@ def загрузить_калибровку(сессия: Path) -> Optional[dict
 
 
 # ---------------------------------------------------------------------------
+# Визуальный стиль графиков (докладный)
+# ---------------------------------------------------------------------------
+
+ЦВЕТА = {
+    "фон": "#F4F0E8",
+    "панель": "#FFFCF7",
+    "чернила": "#1B1916",
+    "приглушённый": "#6E675C",
+    "сетка": "#E4DDD0",
+    "акцент": "#B84E2B",
+    "линия": "#2A2622",
+    "r": "#C0392B",
+    "g": "#2E7D4F",
+    "b": "#2F5D8C",
+}
+
+
+def настроить_стиль_графиков() -> None:
+    plt.rcParams.update(
+        {
+            "figure.facecolor": ЦВЕТА["фон"],
+            "axes.facecolor": ЦВЕТА["панель"],
+            "axes.edgecolor": ЦВЕТА["чернила"],
+            "axes.labelcolor": ЦВЕТА["чернила"],
+            "axes.titlecolor": ЦВЕТА["чернила"],
+            "axes.titlesize": 14,
+            "axes.labelsize": 11,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "xtick.color": ЦВЕТА["приглушённый"],
+            "ytick.color": ЦВЕТА["приглушённый"],
+            "text.color": ЦВЕТА["чернила"],
+            "font.size": 10,
+            "font.family": "DejaVu Sans",
+            "axes.grid": True,
+            "grid.color": ЦВЕТА["сетка"],
+            "grid.linewidth": 0.8,
+            "grid.alpha": 1.0,
+            "legend.frameon": False,
+            "savefig.dpi": 220,
+            "savefig.bbox": "tight",
+            "savefig.facecolor": ЦВЕТА["фон"],
+        }
+    )
+
+
+def длина_волны_в_rgb(нм: float) -> tuple[float, float, float]:
+    """Приблизительный цвет видимого спектра для заливки/подписей."""
+    w = float(нм)
+    if w < 380 or w > 780:
+        return (0.55, 0.55, 0.55)
+    if w < 440:
+        t = (w - 380) / 60
+        r, g, b = 1 - t, 0.0, 1.0
+    elif w < 490:
+        t = (w - 440) / 50
+        r, g, b = 0.0, t, 1.0
+    elif w < 510:
+        t = (w - 490) / 20
+        r, g, b = 0.0, 1.0, 1 - t
+    elif w < 580:
+        t = (w - 510) / 70
+        r, g, b = t, 1.0, 0.0
+    elif w < 645:
+        t = (w - 580) / 65
+        r, g, b = 1.0, 1 - t, 0.0
+    else:
+        r, g, b = 1.0, 0.0, 0.0
+    # ослабление на краях видимого диапазона
+    if w < 420:
+        factor = 0.35 + 0.65 * (w - 380) / 40
+    elif w > 700:
+        factor = 0.35 + 0.65 * (780 - w) / 80
+    else:
+        factor = 1.0
+    return (r * factor, g * factor, b * factor)
+
+
+def _оформить_оси(ax, заголовок: str, xlabel: str, ylabel: str) -> None:
+    ax.set_title(заголовок, fontweight="bold", pad=12)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="major", color=ЦВЕТА["сетка"], lw=0.9)
+    ax.set_axisbelow(True)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_linewidth(1.1)
+        ax.spines[spine].set_color(ЦВЕТА["чернила"])
+
+
+def _подписи_пиков(
+    ax,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    в_нм: bool,
+    максимум_подписей: int = 12,
+) -> None:
+    if len(xs) == 0:
+        return
+    order = np.argsort(ys)[::-1]
+    выбранные = set(order[: min(максимум_подписей, len(order))].tolist())
+    # всегда подписываем самые близкие соседние пары (важный результат)
+    if len(xs) >= 2:
+        order_x = np.argsort(xs)
+        gaps = np.diff(xs[order_x])
+        for k in np.argsort(gaps)[:2]:
+            выбранные.add(int(order_x[k]))
+            выбранные.add(int(order_x[k + 1]))
+
+    ymax = float(np.max(ys)) if len(ys) else 1.0
+    for i in sorted(выбранные, key=lambda j: xs[j]):
+        x, y = float(xs[i]), float(ys[i])
+        текст = f"{x:.1f} нм" if в_нм else f"{x:.0f} px"
+        # чередуем смещение, чтобы реже наезжали
+        вверх = 10 + (i % 3) * 8
+        ax.annotate(
+            текст,
+            xy=(x, y),
+            xytext=(0, вверх),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=ЦВЕТА["чернила"],
+            fontweight="normal",
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": "#FFFDF8",
+                "edgecolor": "#D8CFC0",
+                "linewidth": 0.7,
+                "alpha": 0.92,
+            },
+            arrowprops={
+                "arrowstyle": "-",
+                "color": ЦВЕТА["приглушённый"],
+                "lw": 0.6,
+                "shrinkA": 0,
+                "shrinkB": 2,
+            },
+            zorder=6,
+        )
+        ax.plot(
+            [x],
+            [y],
+            marker="o",
+            ms=4.5,
+            color=ЦВЕТА["акцент"],
+            markeredgecolor="#FFFDF8",
+            markeredgewidth=0.8,
+            zorder=5,
+        )
+    ax.set_ylim(0, ymax * 1.22)
+
+
+# ---------------------------------------------------------------------------
 # Сохранение результатов и графики
 # ---------------------------------------------------------------------------
+
+настроить_стиль_графиков()
+
 
 def сохранить_csv_профиль(путь: Path, профиль: Профиль, wavelengths: np.ndarray | None) -> None:
     with путь.open("w", encoding="utf-8", newline="") as f:
@@ -587,6 +794,16 @@ def сохранить_csv_пики(
     wavelengths: np.ndarray | None,
     fwhm_нм: np.ndarray | None,
 ) -> None:
+    xs = (
+        np.array(wavelengths, dtype=np.float64)
+        if wavelengths is not None
+        else np.array([p.пиксель for p in пики], dtype=np.float64)
+    )
+    order = np.argsort(xs)
+    gap_после = np.full(len(пики), np.nan)
+    for k in range(len(order) - 1):
+        gap_после[order[k]] = xs[order[k + 1]] - xs[order[k]]
+
     with путь.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(
@@ -597,12 +814,15 @@ def сохранить_csv_пики(
                 "fwhm_пикс",
                 "длина_волны_нм",
                 "fwhm_нм",
+                "зазор_до_следующего",
                 "канал",
             ]
         )
         for i, p in enumerate(пики, start=1):
             lam = f"{wavelengths[i-1]:.4f}" if wavelengths is not None else ""
             fw = f"{fwhm_нм[i-1]:.4f}" if fwhm_нм is not None else ""
+            gap = gap_после[i - 1]
+            gap_s = f"{gap:.4f}" if np.isfinite(gap) else ""
             w.writerow(
                 [
                     i,
@@ -611,6 +831,7 @@ def сохранить_csv_пики(
                     f"{p.fwhm_px:.3f}",
                     lam,
                     fw,
+                    gap_s,
                     p.канал,
                 ]
             )
@@ -633,6 +854,7 @@ def метрики(
         },
         "макс_интенсивность": float(профиль.I.max()),
         "средняя_интенсивность": float(профиль.I.mean()),
+        "доля_почти_засвеченных": float(np.mean(профиль.I > 240)),
         "предупреждение_засветки": bool(профиль.I.max() > 250),
     }
     if wavelengths is not None and len(wavelengths) >= 2:
@@ -641,20 +863,40 @@ def метрики(
         fw = fwhm_нм[order] if fwhm_нм is not None else None
         gaps = np.diff(wl)
         out["диапазон_нм"] = [float(wl.min()), float(wl.max())]
+        out["дисперсия_нм_на_пикс"] = float(
+            abs(wavelengths[-1] - wavelengths[0]) / max(len(wavelengths) - 1, 1)
+        )
         out["мин_расстояние_между_пиками_нм"] = float(gaps.min()) if len(gaps) else None
+        близкие_пары = []
+        for k in np.argsort(gaps)[:5]:
+            близкие_пары.append(
+                {
+                    "λ1_нм": float(wl[k]),
+                    "λ2_нм": float(wl[k + 1]),
+                    "Δλ_нм": float(gaps[k]),
+                }
+            )
+        out["ближайшие_пары"] = близкие_пары
+        out["пар_ближе_3_нм"] = int(np.sum(gaps < 3.0))
+        out["пар_ближе_5_нм"] = int(np.sum(gaps < 5.0))
         if fw is not None and len(fw):
             median_fwhm = float(np.median(fw))
             out["медианный_fwhm_нм"] = median_fwhm
-            # оценка R по самым ярким пикам в красной области, если есть
+            out["мин_fwhm_нм"] = float(np.min(fw))
             яркости = np.array([пики[i].интенсивность for i in order])
             top = int(np.argmax(яркости))
             if fw[top] > 1e-9:
                 out["R_оценка_по_ярчайшему"] = float(wl[top] / fw[top])
-            # сколько пар ближе 3 нм (важный результат для неона)
-            близкие = int(np.sum(gaps < 3.0))
-            out["пар_ближе_3_нм"] = близкие
             if median_fwhm > 0:
                 out["R_оценка_медианная"] = float(np.median(wl) / median_fwhm)
+            # резольв по ближайшей паре: разделены ли относительно FWHM
+            if len(gaps):
+                k = int(np.argmin(gaps))
+                mean_fw = float((fw[k] + fw[k + 1]) / 2)
+                out["ближайшая_пара_разрешена"] = bool(gaps[k] > mean_fw)
+                out["критерий_разрешения_Δλ_к_FWHM"] = float(
+                    gaps[k] / mean_fw if mean_fw > 1e-12 else np.nan
+                )
     elif len(пики) >= 2:
         px = np.array([p.пиксель for p in пики])
         gaps = np.diff(np.sort(px))
@@ -663,18 +905,47 @@ def метрики(
     return out
 
 
-def сохранить_превью(путь: Path, профиль: Профиль, пики: list[Пик]) -> None:
+def сохранить_превью(
+    путь: Path,
+    профиль: Профиль,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+) -> None:
     img = профиль.исходник.copy()
     x0, x1, y0, y1 = профиль.roi
-    cv2.rectangle(img, (x0, y0), (x1 - 1, y1 - 1), (0, 255, 255), 2)
-    for p in пики:
+    cv2.rectangle(img, (x0, y0), (x1 - 1, y1 - 1), (0, 220, 255), 2)
+    # подписываем самые яркие пики
+    order = np.argsort([p.интенсивность for p in пики])[::-1][:10]
+    for idx in order:
+        p = пики[int(idx)]
+        label = f"{peak_wl[idx]:.0f}" if peak_wl is not None else f"{p.пиксель:.0f}"
         if профиль.ось_дисперсии == "y":
             y = int(round(p.пиксель))
-            cv2.line(img, (x0, y), (x1, y), (0, 0, 255), 1)
+            cv2.line(img, (x0, y), (x1, y), (40, 40, 255), 1)
+            cv2.putText(
+                img,
+                label,
+                (min(x1 + 4, img.shape[1] - 40), y + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (240, 240, 240),
+                1,
+                cv2.LINE_AA,
+            )
         else:
             x = int(round(p.пиксель))
-            cv2.line(img, (x, y0), (x, y1), (0, 0, 255), 1)
-    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            cv2.line(img, (x, y0), (x, y1), (40, 40, 255), 1)
+            cv2.putText(
+                img,
+                label,
+                (x - 10, max(y0 - 6, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (240, 240, 240),
+                1,
+                cv2.LINE_AA,
+            )
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 93])
     if not ok:
         raise RuntimeError(f"Не удалось сохранить превью: {путь}")
     buf.tofile(str(путь))
@@ -687,27 +958,61 @@ def сохранить_график_спектра(
     wavelengths: np.ndarray | None,
     peak_wl: np.ndarray | None,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    if wavelengths is not None:
-        x = wavelengths
-        xlabel = "Длина волны, нм"
+    в_нм = wavelengths is not None
+    x = wavelengths if в_нм else профиль.ось
+    xlabel = "Длина волны, нм" if в_нм else "Пиксель"
+
+    fig = plt.figure(figsize=(12.5, 5.8))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.13], hspace=0.08)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
+
+    # цветная заливка под кривой по длине волны
+    if в_нм:
+        for i in range(len(x) - 1):
+            c = длина_волны_в_rgb(float(0.5 * (x[i] + x[i + 1])))
+            ax.fill_between(
+                x[i : i + 2],
+                профиль.I[i : i + 2],
+                color=c,
+                alpha=0.22,
+                linewidth=0,
+            )
+            ax_bar.axvspan(x[i], x[i + 1], color=c, linewidth=0)
     else:
-        x = профиль.ось
-        xlabel = "Пиксель"
-    ax.plot(x, профиль.I, color="black", lw=1.2, label="I")
-    ax.plot(x, профиль.Ir, color="tab:red", lw=0.8, alpha=0.7, label="R")
-    ax.plot(x, профиль.Ig, color="tab:green", lw=0.8, alpha=0.7, label="G")
-    ax.plot(x, профиль.Ib, color="tab:blue", lw=0.8, alpha=0.7, label="B")
-    for i, p in enumerate(пики):
-        xp = float(peak_wl[i]) if peak_wl is not None else p.пиксель
-        ax.axvline(xp, color="orange", alpha=0.35, lw=0.8)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Интенсивность (отн.)")
-    ax.set_title("Профиль спектра")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(путь, dpi=150)
+        ax.fill_between(x, профиль.I, color="#B84E2B", alpha=0.12, linewidth=0)
+
+    # мягкое «свечение» линии + основная кривая
+    ax.plot(x, профиль.I, color="#B84E2B", lw=4.0, alpha=0.12, solid_capstyle="round")
+    ax.plot(x, профиль.I, color=ЦВЕТА["линия"], lw=1.7, label="Яркость", zorder=3)
+    ax.plot(x, профиль.Ir, color=ЦВЕТА["r"], lw=1.0, alpha=0.55, label="R")
+    ax.plot(x, профиль.Ig, color=ЦВЕТА["g"], lw=1.0, alpha=0.55, label="G")
+    ax.plot(x, профиль.Ib, color=ЦВЕТА["b"], lw=1.0, alpha=0.55, label="B")
+
+    px = (
+        peak_wl
+        if peak_wl is not None
+        else np.array([p.пиксель for p in пики], dtype=np.float64)
+    )
+    py = np.array([p.интенсивность for p in пики], dtype=np.float64)
+    for xv in px:
+        ax.axvline(xv, color=ЦВЕТА["акцент"], alpha=0.18, lw=0.9, zorder=1)
+    _подписи_пиков(ax, px, py, в_нм=в_нм)
+
+    _оформить_оси(ax, "Спектр с подписанными линиями", xlabel, "Интенсивность (отн.)")
+    ax.legend(loc="upper right", ncols=4, fontsize=8, columnspacing=1.0)
+    ax.tick_params(labelbottom=False)
+
+    ax_bar.set_yticks([])
+    ax_bar.set_xlabel(xlabel)
+    for spine in ax_bar.spines.values():
+        spine.set_visible(False)
+    ax_bar.grid(False)
+    if not в_нм:
+        ax_bar.axhspan(0, 1, color="#D8CFC0")
+    ax_bar.set_ylim(0, 1)
+
+    fig.savefig(путь)
     plt.close(fig)
 
 
@@ -719,23 +1024,36 @@ def сохранить_график_fwhm(
 ) -> None:
     if not пики:
         return
-    fig, ax = plt.subplots(figsize=(9, 4))
-    if peak_wl is not None and fwhm_нм is not None:
-        x = peak_wl
-        y = fwhm_нм
-        ax.set_xlabel("Длина волны, нм")
-        ax.set_ylabel("FWHM, нм")
-        ax.set_title("Ширина линий (FWHM)")
-    else:
-        x = np.array([p.пиксель for p in пики])
-        y = np.array([p.fwhm_px for p in пики])
-        ax.set_xlabel("Пиксель")
-        ax.set_ylabel("FWHM, пикс")
-        ax.set_title("Ширина линий (FWHM)")
-    ax.bar(x, y, width=(np.ptp(x) / max(len(x) * 3, 1)) if len(x) > 1 else 1.0, color="steelblue")
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(путь, dpi=150)
+    в_нм = peak_wl is not None and fwhm_нм is not None
+    x = peak_wl if в_нм else np.array([p.пиксель for p in пики], dtype=np.float64)
+    y = fwhm_нм if в_нм else np.array([p.fwhm_px for p in пики], dtype=np.float64)
+    colors = [
+        длина_волны_в_rgb(float(v)) if в_нм else (0.45, 0.55, 0.70) for v in x
+    ]
+    width = (np.ptp(x) / max(len(x) * 2.8, 1)) if len(x) > 1 else 1.0
+
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
+    bars = ax.bar(x, y, width=width, color=colors, edgecolor="#2A2622", linewidth=0.4)
+    for rect, xv, yv in zip(bars, x, y):
+        ax.text(
+            rect.get_x() + rect.get_width() / 2,
+            yv,
+            f"{xv:.0f}" if в_нм else f"{xv:.0f}",
+            ha="center",
+            va="bottom",
+            fontsize=7.5,
+            color=ЦВЕТА["приглушённый"],
+        )
+    med = float(np.median(y))
+    ax.axhline(med, color=ЦВЕТА["акцент"], ls="--", lw=1.2, label=f"медиана {med:.2f}")
+    _оформить_оси(
+        ax,
+        "Ширина линий (FWHM) — чем уже, тем лучше разрешение",
+        "Длина волны, нм" if в_нм else "Пиксель",
+        "FWHM, нм" if в_нм else "FWHM, пикс",
+    )
+    ax.legend(loc="upper right")
+    fig.savefig(путь)
     plt.close(fig)
 
 
@@ -744,27 +1062,184 @@ def сохранить_карту_линий(
     пики: list[Пик],
     peak_wl: np.ndarray | None,
 ) -> None:
-    """Компактная «линейка» найденных линий — удобно для доклада."""
     if not пики:
         return
-    fig, ax = plt.subplots(figsize=(10, 1.8))
-    if peak_wl is not None:
-        xs = peak_wl
-        ax.set_xlabel("Длина волны, нм")
-        ax.set_xlim(xs.min() - 10, xs.max() + 10)
-    else:
-        xs = np.array([p.пиксель for p in пики])
-        ax.set_xlabel("Пиксель")
-    intensities = np.array([p.интенсивность for p in пики])
-    heights = 0.3 + 0.7 * (intensities / max(intensities.max(), 1e-9))
+    в_нм = peak_wl is not None
+    xs = peak_wl if в_нм else np.array([p.пиксель for p in пики], dtype=np.float64)
+    intensities = np.array([p.интенсивность for p in пики], dtype=np.float64)
+    heights = 0.28 + 0.72 * (intensities / max(intensities.max(), 1e-9))
+
+    fig, ax = plt.subplots(figsize=(12.2, 2.6))
     for x, h in zip(xs, heights):
-        ax.vlines(x, 0, h, color="crimson", lw=1.5)
-    ax.set_ylim(0, 1.05)
+        color = длина_волны_в_rgb(float(x)) if в_нм else ЦВЕТА["акцент"]
+        ax.vlines(x, 0, h, color=color, lw=2.2)
+        ax.plot([x], [h], "o", color=color, ms=4)
+    # подписи сверху
+    order = np.argsort(intensities)[::-1][:12]
+    for i in order:
+        ax.text(
+            xs[i],
+            min(heights[i] + 0.08, 1.05),
+            f"{xs[i]:.0f}",
+            ha="center",
+            va="bottom",
+            fontsize=7.5,
+            color=ЦВЕТА["чернила"],
+            rotation=0,
+        )
+    ax.set_ylim(0, 1.2)
     ax.set_yticks([])
-    ax.set_title("Карта найденных линий")
-    fig.tight_layout()
-    fig.savefig(путь, dpi=150)
+    ax.set_xlim(xs.min() - (8 if в_нм else 5), xs.max() + (8 if в_нм else 5))
+    _оформить_оси(
+        ax,
+        "Карта линий (подписи — положение пиков)",
+        "Длина волны, нм" if в_нм else "Пиксель",
+        "",
+    )
+    ax.grid(False, axis="y")
+    fig.savefig(путь)
     plt.close(fig)
+
+
+def сохранить_график_близких_пар(
+    путь: Path,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+    fwhm_нм: np.ndarray | None,
+) -> None:
+    if peak_wl is None or len(пики) < 2:
+        return
+    order = np.argsort(peak_wl)
+    wl = peak_wl[order]
+    intens = np.array([пики[i].интенсивность for i in order])
+    fw = fwhm_нм[order] if fwhm_нм is not None else None
+    gaps = np.diff(wl)
+    top = np.argsort(gaps)[: min(6, len(gaps))]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.8), gridspec_kw={"width_ratios": [1.35, 1]})
+
+    ax = axes[0]
+    # локальный фрагмент вокруг самой близкой пары
+    k0 = int(top[0])
+    center = 0.5 * (wl[k0] + wl[k0 + 1])
+    span = max(8.0, 4.0 * gaps[k0])
+    mask = (wl >= center - span) & (wl <= center + span)
+    ax.vlines(wl[mask], 0, intens[mask], color=ЦВЕТА["линия"], lw=2.0)
+    ax.plot(wl[mask], intens[mask], "o", color=ЦВЕТА["акцент"], ms=6)
+    for i in np.where(mask)[0]:
+        ax.annotate(
+            f"{wl[i]:.1f}",
+            (wl[i], intens[i]),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            fontsize=8,
+            color=ЦВЕТА["чернила"],
+        )
+    ax.axvspan(wl[k0], wl[k0 + 1], color=ЦВЕТА["акцент"], alpha=0.12)
+    _оформить_оси(
+        ax,
+        f"Самая близкая пара: Δλ = {gaps[k0]:.2f} нм",
+        "Длина волны, нм",
+        "Интенсивность",
+    )
+
+    ax2 = axes[1]
+    labels = [f"{wl[k]:.0f}–{wl[k+1]:.0f}" for k in top]
+    vals = [float(gaps[k]) for k in top]
+    colors = [длина_волны_в_rgb(float(0.5 * (wl[k] + wl[k + 1]))) for k in top]
+    y_pos = np.arange(len(vals))[::-1]
+    ax2.barh(y_pos, vals, color=colors, edgecolor="#2A2622", linewidth=0.4, height=0.65)
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels(labels, fontsize=8)
+    if fw is not None:
+        ax2.axvline(float(np.median(fw)), color=ЦВЕТА["акцент"], ls="--", lw=1.2, label="мед. FWHM")
+        ax2.legend(loc="lower right", fontsize=8)
+    _оформить_оси(ax2, "Ближайшие пары линий", "Δλ, нм", "")
+    fig.savefig(путь)
+    plt.close(fig)
+
+
+def сохранить_график_каналов(
+    путь: Path,
+    профиль: Профиль,
+    пики: list[Пик],
+    wavelengths: np.ndarray | None,
+    peak_wl: np.ndarray | None,
+) -> None:
+    в_нм = wavelengths is not None
+    x = wavelengths if в_нм else профиль.ось
+    xlabel = "Длина волны, нм" if в_нм else "Пиксель"
+    серии = [
+        ("R", профиль.Ir, ЦВЕТА["r"]),
+        ("G", профиль.Ig, ЦВЕТА["g"]),
+        ("B", профиль.Ib, ЦВЕТА["b"]),
+    ]
+    fig, axes = plt.subplots(3, 1, figsize=(12.2, 7.2), sharex=True)
+    px = peak_wl if peak_wl is not None else np.array([p.пиксель for p in пики])
+    for ax, (name, y, color) in zip(axes, серии):
+        ax.fill_between(x, y, color=color, alpha=0.15, linewidth=0)
+        ax.plot(x, y, color=color, lw=1.6)
+        for xv in px:
+            ax.axvline(xv, color=ЦВЕТА["чернила"], alpha=0.08, lw=0.7)
+        _оформить_оси(ax, f"Канал {name}", xlabel if ax is axes[-1] else "", "I (отн.)")
+        if ax is not axes[-1]:
+            ax.set_xlabel("")
+    # подписи только на верхнем
+    py = np.array([p.интенсивность for p in пики])
+    _подписи_пиков(axes[0], px, py * 0 + np.interp(px, x, профиль.Ir), в_нм=в_нм, максимум_подписей=8)
+    fig.suptitle("Разложение по каналам RGB", fontweight="bold", y=0.995)
+    fig.savefig(путь)
+    plt.close(fig)
+
+
+def сохранить_отчёт(
+    путь: Path,
+    фото_имя: str,
+    m: dict,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+) -> None:
+    lines = [
+        f"# Отчёт по спектру: {фото_имя}",
+        "",
+        "## Коротко",
+        f"- Найдено линий: **{m.get('число_пиков', 0)}**",
+    ]
+    if "диапазон_нм" in m:
+        a, b = m["диапазон_нм"]
+        lines.append(f"- Диапазон: **{a:.1f}–{b:.1f} нм**")
+    if m.get("медианный_fwhm_нм") is not None:
+        lines.append(f"- Медианный FWHM: **{m['медианный_fwhm_нм']:.2f} нм**")
+    if m.get("R_оценка_медианная") is not None:
+        lines.append(f"- Оценка R (медианная): **{m['R_оценка_медианная']:.0f}**")
+    if m.get("мин_расстояние_между_пиками_нм") is not None:
+        lines.append(
+            f"- Минимальный зазор между линиями: **{m['мин_расстояние_между_пиками_нм']:.2f} нм**"
+        )
+    if "ближайшая_пара_разрешена" in m:
+        ok = "да" if m["ближайшая_пара_разрешена"] else "спорно / нет"
+        lines.append(f"- Ближайшая пара выглядит разрешённой (Δλ > FWHM): **{ok}**")
+    if m.get("предупреждение_засветки"):
+        lines.append("- ⚠ Есть признак засветки камеры — стоит снизить экспозицию.")
+    lines += ["", "## Ближайшие пары (важно для неона)", ""]
+    for pair in m.get("ближайшие_пары", [])[:5]:
+        lines.append(
+            f"- {pair['λ1_нм']:.1f} и {pair['λ2_нм']:.1f} нм → Δλ = {pair['Δλ_нм']:.2f} нм"
+        )
+    if not m.get("ближайшие_пары"):
+        lines.append("- Нет данных в нм (шкала не применялась).")
+    lines += ["", "## Файлы для доклада", ""]
+    lines += [
+        "- `спектр.png` — главный график с подписями",
+        "- `близкие_пары.png` — акцент на разрешении",
+        "- `fwhm.png` — ширины линий",
+        "- `карта_линий.png` — линейка пиков",
+        "- `каналы_rgb.png` — R/G/B отдельно",
+        "- `пики.csv`, `метрики.json` — числа",
+        "",
+    ]
+    путь.write_text("\n".join(lines), encoding="utf-8")
 
 
 def обработать_одно_фото(
@@ -787,7 +1262,6 @@ def обработать_одно_фото(
         peak_wl = применить_калибровку(
             np.array([p.пиксель for p in пики], dtype=np.float64), coeffs
         )
-        # FWHM в нм: локальная |dλ/dp| * fwhm_px
         deriv = np.polyder(np.array(coeffs, dtype=np.float64))
         fwhm_нм = np.array(
             [
@@ -801,7 +1275,7 @@ def обработать_одно_фото(
     out_dir = сессия / "результаты" / stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    сохранить_превью(out_dir / "превью.jpg", профиль, пики)
+    сохранить_превью(out_dir / "превью.jpg", профиль, пики, peak_wl)
     сохранить_csv_профиль(out_dir / "профиль.csv", профиль, wavelengths)
     сохранить_csv_пики(out_dir / "пики.csv", пики, peak_wl, fwhm_нм)
     сохранить_график_спектра(
@@ -809,6 +1283,12 @@ def обработать_одно_фото(
     )
     сохранить_график_fwhm(out_dir / "fwhm.png", пики, peak_wl, fwhm_нм)
     сохранить_карту_линий(out_dir / "карта_линий.png", пики, peak_wl)
+    сохранить_график_близких_пар(
+        out_dir / "близкие_пары.png", пики, peak_wl, fwhm_нм
+    )
+    сохранить_график_каналов(
+        out_dir / "каналы_rgb.png", профиль, пики, wavelengths, peak_wl
+    )
 
     m = метрики(пики, peak_wl, fwhm_нм, профиль)
     m["файл"] = фото.name
@@ -816,6 +1296,7 @@ def обработать_одно_фото(
     (out_dir / "метрики.json").write_text(
         json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    сохранить_отчёт(out_dir / "отчёт.md", фото.name, m, пики, peak_wl)
 
     if cal is not None:
         used = {
@@ -837,6 +1318,7 @@ def обработать_одно_фото(
             shutil.move(str(фото), str(dest))
 
     печать(f"  пиков: {len(пики)} → {out_dir}")
+    печать("  файлы: спектр.png, близкие_пары.png, fwhm.png, каналы_rgb.png, отчёт.md …")
     return out_dir
 
 
@@ -845,13 +1327,18 @@ def обработать_одно_фото(
 # ---------------------------------------------------------------------------
 
 def режим_калибровать(сессия: Path) -> None:
-    печать("\n=== Калибровка ===")
+    печать("\n=== Настройка шкалы длин волн ===")
+    печать(
+        "Зачем это нужно: на фото программа видит только пиксели.\n"
+        "Шкала переводит «пиксель №312» → «640 нм».\n"
+        "Делается один раз для этой папки эксперимента, пока не двигали установку.\n"
+    )
     выбор = спросить_выбор(
-        "Источник эталона (для шкалы длин волн):",
+        "По какому источнику настроить шкалу?",
         {
-            "1": "неон (есть у вас; также главный образец)",
-            "2": "водород (тусклее, когда заведёте камеру)",
-            "3": "гелий (тусклее, когда заведёте камеру)",
+            "1": "неон (рекомендуем сейчас — яркий, у вас есть)",
+            "2": "водород (когда уверенно снимете камерой)",
+            "3": "гелий (когда уверенно снимете камерой)",
         },
     )
     имя_эт, файл_спр = СПРАВОЧНИКИ[выбор]
@@ -964,16 +1451,30 @@ def режим_калибровать(сессия: Path) -> None:
     xs = np.array([p.пиксель for p in пары])
     ys = np.array([p.длина_волны_нм for p in пары])
     grid = np.linspace(профиль.ось.min(), профиль.ось.max(), 400)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.scatter(xs, ys, color="crimson", zorder=3, label="эталоны")
-    ax.plot(grid, np.polyval(coeffs, grid), color="steelblue", label=имя_форм)
-    ax.set_xlabel("Пиксель")
-    ax.set_ylabel("Длина волны, нм")
-    ax.set_title("Калибровка шкалы")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig, ax = plt.subplots(figsize=(8.5, 5.0))
+    ax.plot(grid, np.polyval(coeffs, grid), color=ЦВЕТА["линия"], lw=2.0, label=имя_форм)
+    ax.scatter(
+        xs,
+        ys,
+        s=55,
+        color=[длина_волны_в_rgb(float(y)) for y in ys],
+        edgecolor=ЦВЕТА["чернила"],
+        linewidths=0.6,
+        zorder=3,
+        label="эталонные линии",
+    )
+    for x, y in zip(xs, ys):
+        ax.annotate(
+            f"{y:.0f}",
+            (x, y),
+            textcoords="offset points",
+            xytext=(6, 4),
+            fontsize=8,
+            color=ЦВЕТА["приглушённый"],
+        )
+    _оформить_оси(ax, "Шкала длин волн: пиксель → нм", "Пиксель", "Длина волны, нм")
+    ax.legend(loc="best")
+    fig.savefig(out)
     plt.close(fig)
     печать(f"График: {out}")
 
@@ -982,12 +1483,12 @@ def режим_обработать(сессия: Path, только_пиксе�
     печать("\n=== Обработка фото ===")
     cal = None if только_пиксели else загрузить_калибровку(сессия)
     if cal is None and not только_пиксели:
-        печать(f"Нет файла {путь_калибровки(сессия)}")
+        печать("Шкала длин волн для этой папки ещё не настроена.")
         выбор = спросить_выбор(
             "Что сделать?",
             {
-                "1": "Сначала откалибровать",
-                "2": "Обработать только в пикселях (без нм)",
+                "1": "Сначала настроить шкалу (нужны нм и разрешение)",
+                "2": "Обработать без шкалы (только пиксели, черновик)",
                 "3": "Отмена",
             },
         )
@@ -1003,21 +1504,25 @@ def режим_обработать(сессия: Path, только_пиксе�
 
     фотографии = список_фото(сессия / "вход")
     if not фотографии:
-        печать(f"Папка пуста: {сессия / 'вход'}")
-        печать("Положите туда необработанные фото и запустите снова.")
+        печать("Новых фото пока нет.")
+        печать(f"Скопируйте снимки сюда и запустите снова:\n  {сессия / 'вход'}")
         return
 
-    печать(f"Калибровка: {'нет (только пиксели)' if cal is None else статус_калибровки(сессия)}")
-    печать(f"Фото во «вход»: {len(фотографии)}")
+    if cal is None:
+        печать("Режим: без шкалы (результаты будут в пикселях, не в нм)")
+    else:
+        печать(f"Шкала длин волн: {статус_калибровки(сессия)}")
+    печать(f"Будут обработаны {len(фотографии)} фото:")
     for p in фотографии:
         печать(f"  • {p.name}")
-    if not да_нет("Продолжить обработку?", True):
+    печать("После обработки исходники переедут в папку «обработанные».")
+    if not да_нет("Начать?", True):
         return
 
     for фото in фотографии:
         обработать_одно_фото(сессия, фото, cal, переносить=True)
 
-    печать(f"\nГотово. Результаты: {сессия / 'результаты'}")
+    печать(f"\nГотово. Смотрите результаты здесь:\n  {сессия / 'результаты'}")
 
 
 def режим_калибровать_и_обработать(сессия: Path) -> None:
@@ -1033,19 +1538,22 @@ def режим_калибровать_и_обработать(сессия: Path
 def главное_меню(сессия: Path) -> None:
     while True:
         n_in = len(список_фото(сессия / "вход"))
-        печать("\n" + "=" * 56)
-        печать("Задача 2 — спектрометр с диска (problem2.py)")
-        печать("=" * 56)
-        печать(f"Сессия:     {сессия}")
-        печать(f"Калибровка: {статус_калибровки(сессия)}")
-        печать(f"Во «вход»:  {n_in} фото")
+        печать("\n" + "=" * 60)
+        печать("Спектрометр с диска — обработка фото")
+        печать("=" * 60)
+        печать(f"Папка эксперимента: {сессия.name}")
+        печать(f"Полный путь:        {сессия}")
+        печать(f"Шкала длин волн:    {статус_калибровки(сессия)}")
+        печать(f"Новых фото во «вход»: {n_in}")
+        печать("")
+        печать(подсказка_следующего_шага(сессия))
         выбор = спросить_выбор(
             "\nЧто сделать?",
             {
-                "1": "Откалибровать",
-                "2": "Обработать фото из «вход»",
-                "3": "Калибровать и сразу обработать",
-                "4": "Сменить / создать сессию",
+                "1": "Настроить шкалу длин волн (пиксель → нм)",
+                "2": "Обработать новые фото из папки «вход»",
+                "3": "Настроить шкалу и сразу обработать фото",
+                "4": "Открыть другую / создать новую папку",
                 "5": "Выход",
             },
         )
@@ -1059,13 +1567,21 @@ def главное_меню(сессия: Path) -> None:
             сессия = выбрать_сессию()
             обеспечить_структуру_сессии(сессия)
         else:
-            печать("Выход.")
+            печать("До встречи.")
             break
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    печать("Задача 2 IYPT — обработка спектров с CD/DVD")
+    печать(
+        "Задача 2 IYPT — спектрометр с CD/DVD\n"
+        "\n"
+        "Коротко, как пользоваться:\n"
+        "  1. Выбираете папку эксперимента (одна настройка установки).\n"
+        "  2. Кладёте фото в подпапку «вход».\n"
+        "  3. Настраиваете шкалу длин волн (один раз).\n"
+        "  4. Обрабатываете фото — графики и таблицы появятся в «результаты».\n"
+    )
     арг_сессии = argv[0] if argv else None
     ПАПКА_СЕССИЙ.mkdir(parents=True, exist_ok=True)
     сессия = выбрать_сессию(арг_сессии)
