@@ -702,26 +702,27 @@ def _подписи_пиков(
     ys: np.ndarray,
     *,
     в_нм: bool,
-    максимум_подписей: int = 12,
+    максимум_подписей: int | None = None,
 ) -> None:
+    """Подписывает все пики (или первые N, если задан лимит)."""
     if len(xs) == 0:
         return
-    order = np.argsort(ys)[::-1]
-    выбранные = set(order[: min(максимум_подписей, len(order))].tolist())
-    # всегда подписываем самые близкие соседние пары (важный результат)
-    if len(xs) >= 2:
-        order_x = np.argsort(xs)
-        gaps = np.diff(xs[order_x])
-        for k in np.argsort(gaps)[:2]:
-            выбранные.add(int(order_x[k]))
-            выбранные.add(int(order_x[k + 1]))
+    индексы = list(range(len(xs)))
+    if максимум_подписей is not None and len(индексы) > максимум_подписей:
+        # если лимит всё же нужен — берём самые яркие, но по умолчанию лимита нет
+        индексы = sorted(
+            индексы, key=lambda j: ys[j], reverse=True
+        )[:максимум_подписей]
 
     ymax = float(np.max(ys)) if len(ys) else 1.0
-    for i in sorted(выбранные, key=lambda j: xs[j]):
+    # уровни подписей по порядку вдоль оси — чтобы соседние не слипались
+    order_x = sorted(индексы, key=lambda j: xs[j])
+    уровни = [12, 28, 44, 20, 36, 52]
+
+    for номер, i in enumerate(order_x):
         x, y = float(xs[i]), float(ys[i])
-        текст = f"{x:.1f} нм" if в_нм else f"{x:.0f} px"
-        # чередуем смещение, чтобы реже наезжали
-        вверх = 10 + (i % 3) * 8
+        текст = f"{x:.1f}" if в_нм else f"{x:.0f}"
+        вверх = уровни[номер % len(уровни)]
         ax.annotate(
             текст,
             xy=(x, y),
@@ -729,20 +730,20 @@ def _подписи_пиков(
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=8,
+            fontsize=7.5,
             color=ЦВЕТА["чернила"],
             fontweight="normal",
             bbox={
-                "boxstyle": "round,pad=0.22",
+                "boxstyle": "round,pad=0.18",
                 "facecolor": "#FFFDF8",
                 "edgecolor": "#D8CFC0",
-                "linewidth": 0.7,
-                "alpha": 0.92,
+                "linewidth": 0.6,
+                "alpha": 0.95,
             },
             arrowprops={
                 "arrowstyle": "-",
                 "color": ЦВЕТА["приглушённый"],
-                "lw": 0.6,
+                "lw": 0.55,
                 "shrinkA": 0,
                 "shrinkB": 2,
             },
@@ -752,13 +753,13 @@ def _подписи_пиков(
             [x],
             [y],
             marker="o",
-            ms=4.5,
+            ms=4.2,
             color=ЦВЕТА["акцент"],
             markeredgecolor="#FFFDF8",
             markeredgewidth=0.8,
             zorder=5,
         )
-    ax.set_ylim(0, ymax * 1.22)
+    ax.set_ylim(0, ymax * 1.38)
 
 
 # ---------------------------------------------------------------------------
@@ -914,10 +915,8 @@ def сохранить_превью(
     img = профиль.исходник.copy()
     x0, x1, y0, y1 = профиль.roi
     cv2.rectangle(img, (x0, y0), (x1 - 1, y1 - 1), (0, 220, 255), 2)
-    # подписываем самые яркие пики
-    order = np.argsort([p.интенсивность for p in пики])[::-1][:10]
-    for idx in order:
-        p = пики[int(idx)]
+    # подписываем все пики
+    for idx, p in enumerate(пики):
         label = f"{peak_wl[idx]:.0f}" if peak_wl is not None else f"{p.пиксель:.0f}"
         if профиль.ось_дисперсии == "y":
             y = int(round(p.пиксель))
@@ -927,7 +926,7 @@ def сохранить_превью(
                 label,
                 (min(x1 + 4, img.shape[1] - 40), y + 4),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
+                0.35,
                 (240, 240, 240),
                 1,
                 cv2.LINE_AA,
@@ -940,7 +939,7 @@ def сохранить_превью(
                 label,
                 (x - 10, max(y0 - 6, 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
+                0.35,
                 (240, 240, 240),
                 1,
                 cv2.LINE_AA,
@@ -962,8 +961,9 @@ def сохранить_график_спектра(
     x = wavelengths if в_нм else профиль.ось
     xlabel = "Длина волны, нм" if в_нм else "Пиксель"
 
-    fig = plt.figure(figsize=(12.5, 5.8))
-    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.13], hspace=0.08)
+    fig = plt.figure(figsize=(12.5, 6.2))
+    # больше зазор между спектром и цветной полосой
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.10], hspace=0.28)
     ax = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
 
@@ -997,14 +997,17 @@ def сохранить_график_спектра(
     py = np.array([p.интенсивность for p in пики], dtype=np.float64)
     for xv in px:
         ax.axvline(xv, color=ЦВЕТА["акцент"], alpha=0.18, lw=0.9, zorder=1)
-    _подписи_пиков(ax, px, py, в_нм=в_нм)
+    _подписи_пиков(ax, px, py, в_нм=в_нм)  # все пики
 
-    _оформить_оси(ax, "Спектр с подписанными линиями", xlabel, "Интенсивность (отн.)")
+    # подпись оси X только под полоской — иначе наезжает на цветной бар
+    _оформить_оси(ax, "Спектр с подписанными линиями", "", "Интенсивность (отн.)")
+    ax.set_xlabel("")
     ax.legend(loc="upper right", ncols=4, fontsize=8, columnspacing=1.0)
     ax.tick_params(labelbottom=False)
 
     ax_bar.set_yticks([])
-    ax_bar.set_xlabel(xlabel)
+    ax_bar.tick_params(axis="x", pad=2)
+    ax_bar.set_xlabel(xlabel, labelpad=10)
     for spine in ax_bar.spines.values():
         spine.set_visible(False)
     ax_bar.grid(False)
@@ -1012,6 +1015,7 @@ def сохранить_график_спектра(
         ax_bar.axhspan(0, 1, color="#D8CFC0")
     ax_bar.set_ylim(0, 1)
 
+    fig.subplots_adjust(hspace=0.32, bottom=0.12, top=0.92)
     fig.savefig(путь)
     plt.close(fig)
 
@@ -1069,17 +1073,18 @@ def сохранить_карту_линий(
     intensities = np.array([p.интенсивность for p in пики], dtype=np.float64)
     heights = 0.28 + 0.72 * (intensities / max(intensities.max(), 1e-9))
 
-    fig, ax = plt.subplots(figsize=(12.2, 2.6))
+    fig, ax = plt.subplots(figsize=(12.2, 3.0))
     for x, h in zip(xs, heights):
         color = длина_волны_в_rgb(float(x)) if в_нм else ЦВЕТА["акцент"]
         ax.vlines(x, 0, h, color=color, lw=2.2)
         ax.plot([x], [h], "o", color=color, ms=4)
-    # подписи сверху
-    order = np.argsort(intensities)[::-1][:12]
-    for i in order:
+    # подписываем ВСЕ линии; соседние поднимаем на разные уровни
+    order_x = np.argsort(xs)
+    for номер, i in enumerate(order_x):
+        y_text = min(heights[i] + 0.06 + (номер % 3) * 0.12, 1.28)
         ax.text(
             xs[i],
-            min(heights[i] + 0.08, 1.05),
+            y_text,
             f"{xs[i]:.0f}",
             ha="center",
             va="bottom",
@@ -1087,7 +1092,7 @@ def сохранить_карту_линий(
             color=ЦВЕТА["чернила"],
             rotation=0,
         )
-    ax.set_ylim(0, 1.2)
+    ax.set_ylim(0, 1.38)
     ax.set_yticks([])
     ax.set_xlim(xs.min() - (8 if в_нм else 5), xs.max() + (8 if в_нм else 5))
     _оформить_оси(
@@ -1185,9 +1190,9 @@ def сохранить_график_каналов(
         _оформить_оси(ax, f"Канал {name}", xlabel if ax is axes[-1] else "", "I (отн.)")
         if ax is not axes[-1]:
             ax.set_xlabel("")
-    # подписи только на верхнем
-    py = np.array([p.интенсивность for p in пики])
-    _подписи_пиков(axes[0], px, py * 0 + np.interp(px, x, профиль.Ir), в_нм=в_нм, максимум_подписей=8)
+    # подписи всех пиков на верхнем канале
+    py_r = np.interp(px, x, профиль.Ir)
+    _подписи_пиков(axes[0], px, py_r, в_нм=в_нм)
     fig.suptitle("Разложение по каналам RGB", fontweight="bold", y=0.995)
     fig.savefig(путь)
     plt.close(fig)
