@@ -757,25 +757,37 @@ def _подписи_пиков(
     в_нм: bool,
     максимум_подписей: int | None = None,
 ) -> None:
-    """Подписывает все пики (или первые N, если задан лимит)."""
+    """Подписывает все пики; соседние поднимает на разные уровни без наложений."""
     if len(xs) == 0:
         return
     индексы = list(range(len(xs)))
     if максимум_подписей is not None and len(индексы) > максимум_подписей:
-        # если лимит всё же нужен — берём самые яркие, но по умолчанию лимита нет
         индексы = sorted(
             индексы, key=lambda j: ys[j], reverse=True
         )[:максимум_подписей]
 
     ymax = float(np.max(ys)) if len(ys) else 1.0
-    # уровни подписей по порядку вдоль оси — чтобы соседние не слипались
     order_x = sorted(индексы, key=lambda j: xs[j])
-    уровни = [12, 28, 44, 20, 36, 52]
+    # уровни в points; для близких по X берём следующий свободный
+    уровни = [14, 30, 46, 62, 22, 38, 54]
+    занято: list[tuple[float, int]] = []  # (x, индекс_уровня)
+    мин_разрыв_x = (float(np.ptp(xs)) * 0.035) if len(xs) > 1 else 1.0
 
-    for номер, i in enumerate(order_x):
+    for i in order_x:
         x, y = float(xs[i]), float(ys[i])
         текст = f"{x:.1f}" if в_нм else f"{x:.0f}"
-        вверх = уровни[номер % len(уровни)]
+        уровень_idx = 0
+        for candidate in range(len(уровни)):
+            конфликт = any(
+                abs(x - x0) < мин_разрыв_x and lvl == candidate
+                for x0, lvl in занято
+            )
+            if not конфликт:
+                уровень_idx = candidate
+                break
+            уровень_idx = candidate
+        занято.append((x, уровень_idx))
+        вверх = уровни[уровень_idx]
         ax.annotate(
             текст,
             xy=(x, y),
@@ -783,20 +795,20 @@ def _подписи_пиков(
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=7.5,
+            fontsize=7.2,
             color=ЦВЕТА["чернила"],
             fontweight="normal",
             bbox={
-                "boxstyle": "round,pad=0.18",
+                "boxstyle": "round,pad=0.15",
                 "facecolor": "#FFFDF8",
                 "edgecolor": "#D8CFC0",
-                "linewidth": 0.6,
-                "alpha": 0.95,
+                "linewidth": 0.55,
+                "alpha": 0.96,
             },
             arrowprops={
                 "arrowstyle": "-",
                 "color": ЦВЕТА["приглушённый"],
-                "lw": 0.55,
+                "lw": 0.5,
                 "shrinkA": 0,
                 "shrinkB": 2,
             },
@@ -806,13 +818,13 @@ def _подписи_пиков(
             [x],
             [y],
             marker="o",
-            ms=4.2,
+            ms=4.0,
             color=ЦВЕТА["акцент"],
             markeredgecolor="#FFFDF8",
             markeredgewidth=0.8,
             zorder=5,
         )
-    ax.set_ylim(0, ymax * 1.38)
+    ax.set_ylim(0, ymax * 1.48)
 
 
 # ---------------------------------------------------------------------------
@@ -1283,9 +1295,6 @@ def сохранить_график_каналов(
         _оформить_оси(ax, f"Канал {name}", xlabel if ax is axes[-1] else "", "I (отн.)")
         if ax is not axes[-1]:
             ax.set_xlabel("")
-    # подписи всех пиков на верхнем канале
-    py_r = np.interp(px, x, профиль.Ir)
-    # на RGB-графике подписи не ставим — иначе наезжают на пики каналов
     fig.suptitle(
         "Каналы камеры R/G/B (это не «настоящий цвет» длины волны)",
         fontweight="bold",
