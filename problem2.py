@@ -928,11 +928,154 @@ def сохранить_csv_пики(
             )
 
 
+def оценить_snr(профиль: Профиль, пики: list[Пик]) -> dict:
+    """SNR по пикам: шум из межпиковых участков профиля."""
+    I = профиль.I.astype(np.float64)
+    if len(I) < 10 or not пики:
+        return {"шум_rms": None, "snr_по_пикам": [], "snr_медианный": None}
+
+    # маска «не пик»: всё дальше 1.5 FWHM от центров
+    mask = np.ones(len(I), dtype=bool)
+    ось0 = float(профиль.ось[0])
+    for p in пики:
+        idx = int(round(p.пиксель - ось0))
+        half = max(int(round(1.5 * p.fwhm_px)), 2)
+        a = max(0, idx - half)
+        b = min(len(I), idx + half + 1)
+        mask[a:b] = False
+    фон = I[mask]
+    if len(фон) < 8:
+        фон = I[I <= np.percentile(I, 30)]
+    if len(фон) < 3:
+        return {"шум_rms": None, "snr_по_пикам": [], "snr_медианный": None}
+
+    baseline = float(np.median(фон))
+    шум = float(np.std(фон))
+    if шум < 1e-9:
+        шум = 1e-9
+    snr_list = []
+    for p in пики:
+        snr = float((p.интенсивность - baseline) / шум)
+        snr_list.append(max(snr, 0.0))
+    return {
+        "шум_rms": шум,
+        "baseline": baseline,
+        "snr_по_пикам": snr_list,
+        "snr_медианный": float(np.median(snr_list)) if snr_list else None,
+        "snr_макс": float(np.max(snr_list)) if snr_list else None,
+    }
+
+
+def загрузить_параметры_сессии(сессия: Path) -> dict:
+    p = сессия / "параметры.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def оценить_вклад_щели(
+    пики: list[Пик],
+    fwhm_нм: np.ndarray | None,
+    дисперсия_нм_пикс: float | None,
+    параметры: dict,
+) -> dict:
+    """
+    Оценка вклада щели в ширину линий.
+
+    1) Пол всегда: FWHM_щели ≈ минимум наблюдаемых FWHM
+       (атомные линии сами по себе много уже инструмента).
+    2) Если в параметры.json заданы ширина_щели_мкм и размер_пикселя_мкм —
+       дополнительно Δλ = w_мкм * (нм/пикс) / пиксель_мкм.
+    """
+    out: dict = {}
+    if fwhm_нм is None or len(fwhm_нм) == 0:
+        return out
+
+    fw = np.asarray(fwhm_нм, dtype=np.float64)
+    floor = float(np.min(fw))
+    out["fwhm_щели_оценка_по_мин_нм"] = floor
+    out["fwhm_щели_доля_в_медианном"] = float(
+        floor / np.median(fw) if np.median(fw) > 1e-12 else np.nan
+    )
+    # квадратичное разложение: FWHM_др = sqrt(FWHM^2 - FWHM_щели^2)
+    other = np.sqrt(np.clip(fw**2 - floor**2, 0, None))
+    out["fwhm_прочее_медианный_нм"] = float(np.median(other))
+    out["fwhm_по_пикам"] = [
+        {
+            "fwhm_нм": float(a),
+            "оценка_щели_нм": floor,
+            "оценка_прочего_нм": float(b),
+            "доля_щели": float(floor / a) if a > 1e-12 else None,
+        }
+        for a, b in zip(fw, other)
+    ]
+
+    w_um = параметры.get("ширина_щели_мкм")
+    pix_um = параметры.get("размер_пикселя_мкм", 1.4)
+    if (
+        w_um is not None
+        and дисперсия_нм_пикс is not None
+        and abs(дисперсия_нм_пикс) > 1e-12
+        and pix_um
+    ):
+        # проекция щели на матрицу ≈ w / pixel, если увеличение ~1 в фокальной плоскости камеры;
+        # для DIY это грубая оценка порядка величины
+        fwhm_geom = abs(float(w_um) * float(дисперсия_нм_пикс) / float(pix_um))
+        out["fwhm_щели_по_геометрии_нм"] = fwhm_geom
+        out["ширина_щели_мкм"] = float(w_um)
+        out["размер_пикселя_мкм"] = float(pix_um)
+    return out
+
+
+def сопоставить_с_nist(
+    peak_wl: np.ndarray,
+    справочник: list[ЛинияСправочника],
+    допуск_нм: float = 2.5,
+) -> list[dict]:
+    линии = np.array([L.длина_волны_нм for L in справочник], dtype=np.float64)
+    результат = []
+    used: set[int] = set()
+    for i, w in enumerate(peak_wl):
+        dists = np.abs(линии - w)
+        j = int(np.argmin(dists))
+        err = float(dists[j])
+        if err <= допуск_нм and j not in used:
+            used.add(j)
+            L = справочник[j]
+            результат.append(
+                {
+                    "пик_нм": float(w),
+                    "nist_нм": float(L.длина_волны_нм),
+                    "Δ_нм": float(w - L.длина_волны_нм),
+                    "подпись": L.подпись,
+                    "индекс_пика": i,
+                }
+            )
+        else:
+            результат.append(
+                {
+                    "пик_нм": float(w),
+                    "nist_нм": None,
+                    "Δ_нм": None,
+                    "подпись": None,
+                    "индекс_пика": i,
+                }
+            )
+    return результат
+
+
 def метрики(
     пики: list[Пик],
     wavelengths: np.ndarray | None,
     fwhm_нм: np.ndarray | None,
     профиль: Профиль,
+    *,
+    snr_info: dict | None = None,
+    slit_info: dict | None = None,
+    nist_info: list[dict] | None = None,
 ) -> dict:
     out: dict = {
         "число_пиков": len(пики),
@@ -948,6 +1091,23 @@ def метрики(
         "доля_почти_засвеченных": float(np.mean(профиль.I > 240)),
         "предупреждение_засветки": bool(профиль.I.max() > 250),
     }
+    if snr_info:
+        out["snr_медианный"] = snr_info.get("snr_медианный")
+        out["snr_макс"] = snr_info.get("snr_макс")
+        out["шум_rms"] = snr_info.get("шум_rms")
+    if slit_info:
+        out["вклад_щели"] = {
+            k: v
+            for k, v in slit_info.items()
+            if k != "fwhm_по_пикам"
+        }
+    if nist_info:
+        matched = [r for r in nist_info if r.get("nist_нм") is not None]
+        if matched:
+            errs = [abs(r["Δ_нм"]) for r in matched if r["Δ_нм"] is not None]
+            out["nist_сопоставлено"] = len(matched)
+            out["nist_ошибка_средняя_нм"] = float(np.mean(errs))
+            out["nist_ошибка_макс_нм"] = float(np.max(errs))
     if wavelengths is not None and len(wavelengths) >= 2:
         order = np.argsort(wavelengths)
         wl = wavelengths[order]
@@ -1461,6 +1621,162 @@ def сохранить_график_каналов(
     fig.subplots_adjust(top=0.93, hspace=0.28)
     fig.savefig(путь)
     plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_nist(
+    путь: Path,
+    профиль: Профиль,
+    wavelengths: np.ndarray | None,
+    peak_wl: np.ndarray | None,
+    справочник: list[ЛинияСправочника],
+    сопоставление: list[dict],
+) -> None:
+    if wavelengths is None or peak_wl is None:
+        return
+    xmin, xmax = float(wavelengths.min()), float(wavelengths.max())
+    nist_in = [
+        L for L in справочник if xmin - 1 <= L.длина_волны_нм <= xmax + 1
+    ]
+
+    fig, (ax, axr) = plt.subplots(
+        2, 1, figsize=(12.5, 6.8), gridspec_kw={"height_ratios": [2.2, 1.0]}, sharex=True
+    )
+    for i in range(len(wavelengths) - 1):
+        c = длина_волны_в_rgb(float(0.5 * (wavelengths[i] + wavelengths[i + 1])))
+        ax.fill_between(
+            wavelengths[i : i + 2],
+            профиль.I[i : i + 2],
+            color=c,
+            alpha=0.45,
+            linewidth=0,
+        )
+    ax.plot(wavelengths, профиль.I, color=ЦВЕТА["линия"], lw=1.5, zorder=3)
+
+    ymax = float(профиль.I.max())
+    for L in nist_in:
+        ax.axvline(L.длина_волны_нм, color="#1B1916", ls=":", lw=0.9, alpha=0.55, zorder=2)
+    for w in peak_wl:
+        ax.plot(w, np.interp(w, wavelengths, профиль.I), "o", color=длина_волны_в_rgb(float(w)), ms=5)
+
+    ax.set_ylim(0, ymax * 1.15)
+    _оформить_оси(ax, "Сверка с NIST", "", "Интенсивность (отн.)")
+    ax.tick_params(labelbottom=False)
+
+    matched = [r for r in сопоставление if r.get("nist_нм") is not None]
+    if matched:
+        xs = [r["nist_нм"] for r in matched]
+        ys = [r["Δ_нм"] for r in matched]
+        cols = [длина_волны_в_rgb(float(x)) for x in xs]
+        axr.axhline(0, color=ЦВЕТА["приглушённый"], lw=1.0)
+        axr.scatter(xs, ys, c=cols, s=45, edgecolors="#2A2622", linewidths=0.4, zorder=3)
+        for r in matched:
+            axr.text(
+                r["nist_нм"],
+                r["Δ_нм"],
+                f"{r['Δ_нм']:+.1f}",
+                fontsize=7,
+                ha="center",
+                va="bottom" if r["Δ_нм"] >= 0 else "top",
+            )
+    _оформить_оси(axr, "", "Длина волны, нм", "Δ, нм")
+    ax.set_xlim(xmin, xmax)
+    ax.margins(x=0)
+    axr.set_xlim(xmin, xmax)
+    axr.margins(x=0)
+    fig.tight_layout()
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_snr(
+    путь: Path,
+    пики: list[Пик],
+    peak_wl: np.ndarray | None,
+    snr_info: dict,
+) -> None:
+    snrs = snr_info.get("snr_по_пикам") or []
+    if not snrs or not пики:
+        return
+    xs = (
+        peak_wl
+        if peak_wl is not None
+        else np.array([p.пиксель for p in пики], dtype=np.float64)
+    )
+    в_нм = peak_wl is not None
+    colors = [длина_волны_в_rgb(float(x)) if в_нм else (0.5, 0.5, 0.55) for x in xs]
+    width = (np.ptp(xs) / max(len(xs) * 2.8, 1)) if len(xs) > 1 else 1.0
+
+    fig, ax = plt.subplots(figsize=(11.5, 4.6))
+    ax.bar(xs, snrs, width=width, color=colors, edgecolor="#2A2622", linewidth=0.4)
+    med = snr_info.get("snr_медианный")
+    if med is not None:
+        ax.axhline(med, color=ЦВЕТА["акцент"], ls="--", lw=1.2)
+        _подпись_вне_графика(ax, f"медиана SNR = {med:.0f}", где="верх_справа")
+    _оформить_оси(
+        ax,
+        "SNR",
+        "Длина волны, нм" if в_нм else "Пиксель",
+        "SNR",
+    )
+    ax.set_ylim(0, max(snrs) * 1.25)
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
+
+
+def сохранить_график_вклада_щели(
+    путь: Path,
+    peak_wl: np.ndarray | None,
+    slit_info: dict,
+) -> None:
+    rows = slit_info.get("fwhm_по_пикам") or []
+    if not rows:
+        return
+    xs = (
+        peak_wl
+        if peak_wl is not None
+        else np.arange(len(rows), dtype=np.float64)
+    )
+    в_нм = peak_wl is not None
+    slit = np.array([r["оценка_щели_нм"] for r in rows], dtype=np.float64)
+    other = np.array([r["оценка_прочего_нм"] for r in rows], dtype=np.float64)
+    width = (np.ptp(xs) / max(len(xs) * 2.8, 1)) if len(xs) > 1 else 1.0
+
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
+    ax.bar(
+        xs,
+        slit,
+        width=width,
+        color="#B84E2B",
+        edgecolor="#2A2622",
+        linewidth=0.3,
+        label="щель (оценка)",
+    )
+    ax.bar(
+        xs,
+        other,
+        width=width,
+        bottom=slit,
+        color="#D8CFC0",
+        edgecolor="#2A2622",
+        linewidth=0.3,
+        label="прочее",
+    )
+    geom = slit_info.get("fwhm_щели_по_геометрии_нм")
+    if geom is not None:
+        ax.axhline(geom, color="#2F5D8C", ls="--", lw=1.2, label=f"геометрия {geom:.2f} нм")
+    _оформить_оси(
+        ax,
+        "Вклад щели в FWHM",
+        "Длина волны, нм" if в_нм else "№ пика",
+        "FWHM, нм",
+    )
+    _легенда_снаружи(ax, fig)
+    fig.savefig(путь)
+    plt.close(fig)
+    plt.close("all")
 
 
 def сохранить_отчёт(
@@ -1492,20 +1808,37 @@ def сохранить_отчёт(
         lines.append(f"- Ближайшая пара выглядит разрешённой (Δλ > FWHM): **{ok}**")
     if m.get("предупреждение_засветки"):
         lines.append("- ⚠ Есть признак засветки камеры — стоит снизить экспозицию.")
-    lines += ["", "## Ближайшие пары (важно для неона)", ""]
+    if m.get("snr_медианный") is not None:
+        lines.append(f"- SNR (медиана): **{m['snr_медианный']:.0f}**")
+    if m.get("nist_сопоставлено"):
+        lines.append(
+            f"- NIST: сопоставлено **{m['nist_сопоставлено']}**, "
+            f"ср. ошибка **{m.get('nist_ошибка_средняя_нм', 0):.2f} нм**"
+        )
+    vs = m.get("вклад_щели") or {}
+    if vs.get("fwhm_щели_оценка_по_мин_нм") is not None:
+        lines.append(
+            f"- Оценка FWHM щели (по мин. линии): **{vs['fwhm_щели_оценка_по_мин_нм']:.2f} нм**"
+        )
+    if vs.get("fwhm_щели_по_геометрии_нм") is not None:
+        lines.append(
+            f"- Оценка FWHM щели (геометрия): **{vs['fwhm_щели_по_геометрии_нм']:.2f} нм**"
+        )
+    lines += ["", "## Ближайшие пары", ""]
     for pair in m.get("ближайшие_пары", [])[:5]:
         lines.append(
             f"- {pair['λ1_нм']:.1f} и {pair['λ2_нм']:.1f} нм → Δλ = {pair['Δλ_нм']:.2f} нм"
         )
     if not m.get("ближайшие_пары"):
-        lines.append("- Нет данных в нм (шкала не применялась).")
+        lines.append("- Нет данных в нм.")
     lines += [
         "",
         "## Файлы",
         "",
-        "- `спектр.png`, `карта_линий.png`, `близкие_пары.png`",
-        "- `fwhm.png`, `разрешение.png`, `критерий_разрешения.png`, `дисперсия.png`",
-        "- `каналы_rgb.png`, `пики.csv`, `метрики.json`",
+        "- `спектр.png`, `сверка_nist.png`, `карта_линий.png`, `близкие_пары.png`",
+        "- `fwhm.png`, `вклад_щели.png`, `snr.png`, `разрешение.png`",
+        "- `критерий_разрешения.png`, `дисперсия.png`, `каналы_rgb.png`",
+        "- `пики.csv`, `сверка_nist.csv`, `метрики.json`",
         "",
     ]
     путь.write_text("\n".join(lines), encoding="utf-8")
@@ -1630,7 +1963,60 @@ def обработать_одно_фото(
         out_dir / "каналы_rgb.png", профиль, пики, wavelengths, peak_wl
     )
 
-    m = метрики(пики, peak_wl, fwhm_нм, профиль)
+    snr_info = оценить_snr(профиль, пики)
+    сохранить_график_snr(out_dir / "snr.png", пики, peak_wl, snr_info)
+
+    параметры = загрузить_параметры_сессии(сессия)
+    дисп = None
+    if wavelengths is not None and len(wavelengths) > 1:
+        дисп = abs(float(wavelengths[-1] - wavelengths[0]) / max(len(wavelengths) - 1, 1))
+    slit_info = оценить_вклад_щели(пики, fwhm_нм, дисп, параметры)
+    if slit_info:
+        сохранить_график_вклада_щели(out_dir / "вклад_щели.png", peak_wl, slit_info)
+
+    nist_info = None
+    if cal is not None and peak_wl is not None:
+        имя_эт = cal.get("эталон", "неон")
+        файл_спр = {
+            "неон": "неон.csv",
+            "водород": "водород.csv",
+            "гелий": "гелий.csv",
+        }.get(имя_эт, "неон.csv")
+        try:
+            спр = загрузить_справочник(файл_спр)
+            nist_info = сопоставить_с_nist(peak_wl, спр)
+            сохранить_график_nist(
+                out_dir / "сверка_nist.png",
+                профиль,
+                wavelengths,
+                peak_wl,
+                спр,
+                nist_info,
+            )
+            (out_dir / "сверка_nist.csv").write_text(
+                "пик_нм,nist_нм,delta_нм,подпись\n"
+                + "\n".join(
+                    f"{r['пик_нм']:.4f},"
+                    f"{'' if r['nist_нм'] is None else f'{r['nist_нм']:.4f}'},"
+                    f"{'' if r['Δ_нм'] is None else f'{r['Δ_нм']:.4f}'},"
+                    f"{r['подпись'] or ''}"
+                    for r in nist_info
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as e:
+            печать(f"  NIST-сверка пропущена: {e}")
+
+    m = метрики(
+        пики,
+        peak_wl,
+        fwhm_нм,
+        профиль,
+        snr_info=snr_info,
+        slit_info=slit_info,
+        nist_info=nist_info,
+    )
     m["файл"] = фото.name
     m["калибровка_использована"] = cal is not None
     (out_dir / "метрики.json").write_text(
