@@ -1032,6 +1032,8 @@ def сохранить_график_спектра(
     ax = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[1, 0], sharex=ax)
 
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+
     # цветная заливка под кривой по длине волны
     if в_нм:
         for i in range(len(x) - 1):
@@ -1043,11 +1045,21 @@ def сохранить_график_спектра(
                 alpha=0.22,
                 linewidth=0,
             )
-            ax_bar.axvspan(x[i], x[i + 1], color=c, linewidth=0)
+        # полоска на весь диапазон оси — без белых краёв от запасных полей matplotlib
+        n_bar = 512
+        grid = np.linspace(xmin, xmax, n_bar)
+        rgb = np.array([[длина_волны_в_rgb(float(v)) for v in grid]], dtype=np.float64)
+        ax_bar.imshow(
+            rgb,
+            aspect="auto",
+            extent=(xmin, xmax, 0, 1),
+            origin="lower",
+            interpolation="bilinear",
+        )
     else:
         ax.fill_between(x, профиль.I, color="#B84E2B", alpha=0.12, linewidth=0)
+        ax_bar.axhspan(0, 1, color="#D8CFC0")
 
-    # только яркость на главном графике — R/G/B путают (это камера, не «цвет волны»)
     ax.plot(x, профиль.I, color="#B84E2B", lw=4.0, alpha=0.12, solid_capstyle="round")
     ax.plot(x, профиль.I, color=ЦВЕТА["линия"], lw=1.8, zorder=3)
 
@@ -1059,12 +1071,12 @@ def сохранить_график_спектра(
     py = np.array([p.интенсивность for p in пики], dtype=np.float64)
     for xv in px:
         ax.axvline(xv, color=ЦВЕТА["акцент"], alpha=0.18, lw=0.9, zorder=1)
-    _подписи_пиков(ax, px, py, в_нм=в_нм)  # все пики
+    _подписи_пиков(ax, px, py, в_нм=в_нм)
 
-    # подпись оси X только под полоской — иначе наезжает на цветной бар
     _оформить_оси(ax, "Спектр с подписанными линиями", "", "Интенсивность (отн.)")
     ax.set_xlabel("")
     ax.tick_params(labelbottom=False)
+    ax.set_xlim(xmin, xmax)
 
     ax_bar.set_yticks([])
     ax_bar.tick_params(axis="x", pad=2)
@@ -1072,20 +1084,10 @@ def сохранить_график_спектра(
     for spine in ax_bar.spines.values():
         spine.set_visible(False)
     ax_bar.grid(False)
-    if not в_нм:
-        ax_bar.axhspan(0, 1, color="#D8CFC0")
     ax_bar.set_ylim(0, 1)
+    ax_bar.set_xlim(xmin, xmax)
 
-    fig.subplots_adjust(hspace=0.32, bottom=0.16, top=0.90)
-    fig.text(
-        0.5,
-        0.02,
-        "Цветная полоска — ориентир «какой цвет у этой длины волны для глаза». "
-        "Каналы камеры R/G/B смотрите в каналы_rgb.png",
-        ha="center",
-        fontsize=8,
-        color=ЦВЕТА["приглушённый"],
-    )
+    fig.subplots_adjust(hspace=0.28, bottom=0.12, top=0.90)
     fig.savefig(путь)
     plt.close(fig)
 
@@ -1249,9 +1251,8 @@ def сохранить_график_близких_пар(
         med_fw = float(np.median(fw))
         xmax = max(xmax, med_fw)
         ax2.axvline(med_fw, color=ЦВЕТА["акцент"], ls="--", lw=1.2)
-        _подпись_вне_графика(
-            ax2, f"пунктир: медиана FWHM = {med_fw:.2f} нм", где="верх_справа"
-        )
+        _подпись_вне_графика(ax2, f"FWHM = {med_fw:.2f} нм", где="верх_справа")
+
     for yp, val in zip(y_pos, vals):
         ax2.text(
             val + 0.04 * xmax,
@@ -1295,20 +1296,8 @@ def сохранить_график_каналов(
         _оформить_оси(ax, f"Канал {name}", xlabel if ax is axes[-1] else "", "I (отн.)")
         if ax is not axes[-1]:
             ax.set_xlabel("")
-    fig.suptitle(
-        "Каналы камеры R/G/B (это не «настоящий цвет» длины волны)",
-        fontweight="bold",
-        y=0.995,
-    )
-    fig.text(
-        0.5,
-        0.01,
-        "Нужны для диагностики засветки и баланса белого. Для доклада про разрешение смотрите спектр.png и близкие_пары.png",
-        ha="center",
-        fontsize=8,
-        color=ЦВЕТА["приглушённый"],
-    )
-    fig.subplots_adjust(bottom=0.06, top=0.93, hspace=0.28)
+    fig.suptitle("Каналы R / G / B", fontweight="bold", y=0.995)
+    fig.subplots_adjust(top=0.93, hspace=0.28)
     fig.savefig(путь)
     plt.close(fig)
 
@@ -1351,21 +1340,14 @@ def сохранить_отчёт(
         lines.append("- Нет данных в нм (шкала не применялась).")
     lines += [
         "",
-        "## Что проверить перед докладом",
+        "## Файлы",
         "",
-        "- На `превью.jpg` рамка ROI охватывает весь спектр, без обрезки линий.",
-        "- На `близкие_пары.png` ближайший дублет выглядит разделённым (Δλ ≳ FWHM).",
-        "- Нет сильной засветки: иначе FWHM завышен и R занижен.",
-        "- Сравнивайте разные щели/диски по `результаты/сводка.md` в папке эксперимента.",
-        "",
-        "## Файлы для доклада",
-        "",
-        "- `спектр.png` — главный график с подписями",
-        "- `близкие_пары.png` — акцент на разрешении",
-        "- `fwhm.png` — ширины линий",
-        "- `карта_линий.png` — линейка пиков",
-        "- `каналы_rgb.png` — диагностика камеры (не для «цвета волны»)",
-        "- `пики.csv`, `метрики.json` — числа",
+        "- `спектр.png`",
+        "- `близкие_пары.png`",
+        "- `fwhm.png`",
+        "- `карта_линий.png`",
+        "- `каналы_rgb.png`",
+        "- `пики.csv`, `метрики.json`",
         "",
     ]
     путь.write_text("\n".join(lines), encoding="utf-8")
@@ -1429,12 +1411,7 @@ def собрать_сводку_сессии(сессия: Path) -> Path | None:
             f"{fmt(s['R_мед'], 0)} | {s['пар_<3нм'] if s['пар_<3нм'] != '' else '—'} | "
             f"{s['засветка']} |"
         )
-    md += [
-        "",
-        "Чем меньше медианный FWHM и чем больше R при том же источнике — тем лучше установка.",
-        "Для неона смотрите колонку «мин Δλ» и «пар <3 нм».",
-        "",
-    ]
+    md.append("")
     md_path = папка / "сводка.md"
     md_path.write_text("\n".join(md), encoding="utf-8")
     return md_path
