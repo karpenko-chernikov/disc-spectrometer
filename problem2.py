@@ -273,6 +273,7 @@ class Профиль:
     roi: tuple[int, int, int, int]  # x0, x1, y0, y1
     ось_дисперсии: str       # "y" или "x"
     исходник: np.ndarray     # BGR
+    baseline: float = 0.0    # вычтенный пьедестал камеры/фона
 
 
 @dataclass
@@ -366,6 +367,14 @@ def построить_профиль(img: np.ndarray) -> Профиль:
         I = gray.mean(axis=0)
         ось = np.arange(x0, x1, dtype=np.float64)
 
+    # Пьедестал камеры / тёмный фон: «чёрное» на фото редко даёт ровно 0.
+    # Вычитаем низкий перцентиль профиля, чтобы пол шёл у нуля.
+    baseline = float(np.percentile(I, 5))
+    I = np.clip(I - baseline, 0, None)
+    Ir = np.clip(Ir - baseline, 0, None)
+    Ig = np.clip(Ig - baseline, 0, None)
+    Ib = np.clip(Ib - baseline, 0, None)
+
     return Профиль(
         ось=ось,
         I=I,
@@ -375,6 +384,7 @@ def построить_профиль(img: np.ndarray) -> Профиль:
         roi=(x0, x1, y0, y1),
         ось_дисперсии=ось_дисп,
         исходник=img,
+        baseline=baseline,
     )
 
 
@@ -1089,8 +1099,11 @@ def метрики(
         },
         "макс_интенсивность": float(профиль.I.max()),
         "средняя_интенсивность": float(профиль.I.mean()),
+        "baseline": float(профиль.baseline),
         "доля_почти_засвеченных": float(np.mean(профиль.I > 240)),
-        "предупреждение_засветки": bool(профиль.I.max() > 250),
+        "предупреждение_засветки": bool(
+            профиль.I.max() + профиль.baseline > 250
+        ),
     }
     if snr_info:
         out["snr_медианный"] = snr_info.get("snr_медианный")
